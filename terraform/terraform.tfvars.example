@@ -1,0 +1,8 @@
+# Copie para terraform.tfvars. jwt_secret é obrigatório e deve ser o mesmo da API.
+regiao     = "us-east-1"
+ambientes  = ["hml", "prod"] # use ["hml"] em sessões de teste
+jwt_secret = "troque-este-segredo-em-producao"
+
+# Ligue depois que o repo oficina-infra-k8s criar o API Gateway (habilitar_gateway = true).
+habilitar_rota_gateway = false
+habilitar_url_funcao   = true

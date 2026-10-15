@@ -1,0 +1,143 @@
+# CD: build do bundle + terraform apply automático. As funções de hml e prod
+# ficam em um único state; a branch define o environment do GitHub
+# (homolog → hml, main → prod), que carrega os secrets (JWT_SECRET igual ao da
+# API) e as regras de aprovação. Os applies são serializados.
+#
+# Pré-requisitos: repos oficina-infra-k8s e oficina-infra-db aplicados (VPC,
+# SG e segredo do banco publicados) e credenciais do Learner Lab renovadas.
+name: CD
+
+on:
+  push:
+    branches: [homolog, main]
+  workflow_dispatch:
+    inputs:
+      destruir:
+        description: 'Executar terraform destroy (fim da sessão do lab)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-oficina-auth-lambda
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_IN_AUTOMATION: 'true'
+  AMBIENTE: ${{ github.ref_name == 'main' && 'prod' || 'hml' }}
+
+jobs:
+  deploy:
+    name: ${{ inputs.destruir && 'terraform destroy' || 'build e terraform apply' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'hml' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Build do bundle
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+          terraform_wrapper: false
+
+      - name: Credenciais AWS (Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Verificar sessão do lab
+        run: aws sts get-caller-identity
+
+      - name: Verificar pré-requisitos (rede e banco publicados)
+        if: ${{ !inputs.destruir }}
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          test -n "$JWT_SECRET" || { echo "::error::secret JWT_SECRET ausente no environment ${AMBIENTE} (deve ser igual ao da API)"; exit 1; }
+          for p in /oficina/vpc/id /oficina/vpc/subnets-privadas; do
+            aws ssm get-parameter --name "$p" --query Parameter.Value --output text >/dev/null \
+              || { echo "::error::Parâmetro $p ausente no SSM. Aplique o repo oficina-infra-k8s primeiro."; exit 1; }
+          done
+          for amb in $(echo '${{ vars.AMBIENTES || '["hml","prod"]' }}' | jq -r '.[]'); do
+            aws ssm get-parameter --name "/oficina/$amb/db/sg-id" --query Parameter.Value --output text >/dev/null \
+              || { echo "::error::/oficina/$amb/db/sg-id ausente. Aplique o repo oficina-infra-db primeiro."; exit 1; }
+          done
+
+      - name: terraform init
+        working-directory: terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=oficina-auth-lambda/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: terraform apply
+        if: ${{ !inputs.destruir }}
+        working-directory: terraform
+        env:
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var='ambientes=${{ vars.AMBIENTES || '["hml","prod"]' }}' \
+            -var="habilitar_rota_gateway=${{ vars.HABILITAR_GATEWAY || 'false' }}"
+
+      # Invoca a função do ambiente da branch com os CPFs do seed da API:
+      # Maria (ativa) → 200 com token; Carlos (inativo) → 403; inválido → 400.
+      - name: Smoke test
+        if: ${{ !inputs.destruir }}
+        run: |
+          FUNCAO=$(aws ssm get-parameter --name "/oficina/${AMBIENTE}/auth/lambda-nome" --query Parameter.Value --output text)
+          invocar() {
+            printf '{"version":"2.0","rawPath":"/auth/cpf","requestContext":{"requestId":"smoke","http":{"method":"POST","path":"/auth/cpf"}},"body":"{\\"cpf\\":\\"%s\\"}","isBase64Encoded":false}' "$1" > evento.json
+            aws lambda invoke --function-name "$FUNCAO" --cli-binary-format raw-in-base64-out --payload file://evento.json resposta.json >/dev/null
+            jq -r .statusCode resposta.json
+          }
+          esperar() {
+            status=$(invocar "$1"); echo "CPF $1 → HTTP $status (esperado $2)"
+            [ "$status" = "$2" ] || { echo "::error::Smoke test falhou"; cat resposta.json; exit 1; }
+          }
+          esperar 11144477735 200
+          esperar 12345678909 403
+          esperar 11144477736 400
+          echo "Token emitido para o CPF ativo:"; jq -r '.body | fromjson | .tipo' resposta.json >/dev/null
+          echo "::notice::Autenticação por CPF respondendo em ${AMBIENTE}"
+
+      - name: Resumo
+        if: ${{ !inputs.destruir }}
+        working-directory: terraform
+        run: |
+          {
+            echo "## Function de autenticação aplicada"
+            echo
+            echo '```'
+            terraform output -no-color
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform destroy
+        if: ${{ inputs.destruir }}
+        working-directory: terraform
+        env:
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET || 'destroy' }}
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var='ambientes=${{ vars.AMBIENTES || '["hml","prod"]' }}' \
+            -var="habilitar_rota_gateway=${{ vars.HABILITAR_GATEWAY || 'false' }}"

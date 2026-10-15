@@ -1,0 +1,7 @@
+# Copie para backend.hcl e ajuste o bucket (o mesmo usado pelos outros repos).
+# Uso: terraform init -backend-config=backend.hcl
+bucket         = "oficina-terraform-state-<SEU-SUFIXO>"
+key            = "oficina-auth-lambda/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "oficina-terraform-lock"
+encrypt        = true
