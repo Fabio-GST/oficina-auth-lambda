@@ -10,7 +10,8 @@ output "urls_funcao" {
 
 output "rotas_gateway" {
   description = "Rota criada no API Gateway por ambiente (vazio até habilitar_rota_gateway = true)."
-  value       = { for amb in local.ambientes_gateway : amb => "${data.aws_ssm_parameter.gateway_id[amb].value}: ${aws_apigatewayv2_route.auth_cpf[amb].route_key}" }
+  # O provider marca o valor de parâmetros SSM como sensível; o id do gateway não é.
+  value = { for amb in local.ambientes_gateway : amb => "${nonsensitive(data.aws_ssm_parameter.gateway_id[amb].value)}: ${aws_apigatewayv2_route.auth_cpf[amb].route_key}" }
 }
 
 output "security_groups" {
