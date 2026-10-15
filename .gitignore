@@ -1,0 +1,21 @@
+# Node
+node_modules/
+dist/
+coverage/
+.env
+
+# Terraform
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.zip
+crash.log
+terraform/terraform.tfvars
+terraform/backend.hcl
+
+# SO / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
